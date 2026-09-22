@@ -342,21 +342,29 @@
             }
 
             if (!response.ok) {
-                throw new Error(`API 오류 (${response.status}) - API 키를 확인해주세요.`);
+                const errText = await response.text();
+                console.error(`API Error Response:`, errText);
+                throw new Error(`API 오류 (${response.status})`);
             }
 
             const result = await response.json();
+            console.log(`[${keyword}] API 응답 결과:`, result);
+
             const candidate = result.candidates?.[0];
 
             if (candidate && candidate.content?.parts?.[0]?.text) {
-                const jsonText = candidate.content.parts[0].text;
+                let jsonText = candidate.content.parts[0].text;
+                // 마크다운 코드블록 포함 여부 방어 처리
+                jsonText = jsonText.replace(/```json/g, '').replace(/```/g, '').trim();
                 try {
                     const parsed = JSON.parse(jsonText);
                     return Array.isArray(parsed) ? parsed : [];
                 } catch(e) {
-                    console.error("JSON parse error", e);
+                    console.error("JSON parse error for text:", jsonText, e);
                     return [];
                 }
+            } else {
+                console.warn(`[${keyword}] 검색 결과 텍스트가 없습니다. Grounding 메타데이터 확인:`, candidate?.groundingMetadata);
             }
             return [];
         }
@@ -393,8 +401,10 @@
 
             if (newsList.length === 0) {
                 html += `
-                    <div class="py-8 text-center text-slate-400 text-xs">
-                        검색된 뉴스가 없습니다.
+                    <div class="py-8 text-center text-slate-400 text-xs flex flex-col gap-1 items-center">
+                        <svg class="w-8 h-8 text-slate-300" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                        <span>검색된 기사가 없습니다.</span>
+                        <span class="text-[11px] text-slate-400">F12 개발자도구 콘솔(Console)에서 응답을 확인해보세요.</span>
                     </div>
                 `;
             } else {
