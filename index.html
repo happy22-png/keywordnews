@@ -58,6 +58,15 @@
             </button>
         </div>
 
+        <!-- 429 Rate Limit Warning Banner (Hidden by default) -->
+        <div id="rateLimitBanner" class="hidden bg-amber-50 border border-amber-200 rounded-2xl p-4 flex items-start gap-3 text-amber-800">
+            <svg class="w-5 h-5 text-amber-600 shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path></svg>
+            <div class="text-xs sm:text-sm flex-1">
+                <span class="font-bold">API 할당량 초과 (429 Rate Limit) 감지됨:</span> 현재 사용 중인 Gemini API 키의 호출 한도를 초과했습니다. 자동으로 <strong>테스트 가상 뉴스(Mock Data)</strong> 모드로 전환되어 대시보드가 정상 표시됩니다. 개인 API 키를 교체하시려면 우측 상단 [설정]을 이용해주세요.
+            </div>
+            <button onclick="document.getElementById('rateLimitBanner').classList.add('hidden')" class="text-amber-600 hover:text-amber-900 font-bold px-1">✕</button>
+        </div>
+
         <!-- Current Active Keywords Pill Bar -->
         <div class="flex items-center justify-between bg-white px-5 py-3 rounded-2xl border border-slate-100 shadow-sm">
             <div class="flex items-center gap-2 overflow-x-auto py-1" id="keywordPillsContainer">
@@ -69,7 +78,7 @@
         <!-- Loading Indicator -->
         <div id="loadingIndicator" class="hidden flex flex-col items-center justify-center py-20 gap-3">
             <div class="animate-spin rounded-full h-12 w-12 border-4 border-indigo-600 border-t-transparent"></div>
-            <p class="text-slate-500 font-medium text-sm">실시간 구글 뉴스를 수집하고 분석 중입니다...</p>
+            <p id="loadingText" class="text-slate-500 font-medium text-sm">실시간 구글 뉴스를 수집하고 분석 중입니다...</p>
         </div>
 
         <!-- Columns Grid (Up to 5 columns with vertical dividers) -->
@@ -247,6 +256,7 @@
             }
 
             const loading = document.getElementById('loadingIndicator');
+            const loadingText = document.getElementById('loadingText');
             const grid = document.getElementById('newsColumnsGrid');
             const emptyState = document.getElementById('emptyState');
 
@@ -263,8 +273,10 @@
             // 순차적(Sequential)으로 키워드별 뉴스를 수집하여 429(Rate Limit) 에러 방지
             for (let i = 0; i < appState.keywords.length; i++) {
                 const keyword = appState.keywords[i];
+                loadingText.innerText = `[${keyword}] 키워드 뉴스 수집 및 분석 중 (${i + 1}/${appState.keywords.length})...`;
+                
                 try {
-                    const newsList = await fetchNewsForKeyword(keyword, days);
+                    const newsList = await fetchNewsWithRetry(keyword, days, 3);
                     results.push(newsList);
                     
                     let filteredList = newsList;
@@ -275,14 +287,14 @@
 
                     renderColumn(keyword, filteredList, i, appState.keywords.length);
 
-                    // API 제한 회피를 위해 다음 키워드 요청 전 1.5초 대기
+                    // API 제한 회피를 위해 다음 키워드 요청 전 2초 대기
                     if (i < appState.keywords.length - 1) {
-                        await new Promise(resolve => setTimeout(resolve, 1500));
+                        await new Promise(resolve => setTimeout(resolve, 2000));
                     }
                 } catch (err) {
                     console.error(`Error fetching for ${keyword}:`, err);
                     results.push([]);
-                    renderColumn(keyword, [], i, appState.keywords.length);
+                    renderColumn(keyword, [], i, appState.keywords.length, err.message);
                 }
             }
 
@@ -291,6 +303,26 @@
             if (results.every(list => list.length === 0)) {
                 emptyState.classList.remove('hidden');
             }
+        }
+
+        async function fetchNewsWithRetry(keyword, days, maxRetries) {
+            for (let attempt = 1; attempt <= maxRetries; attempt++) {
+                try {
+                    return await fetchNewsForKeyword(keyword, days);
+                } catch (err) {
+                    console.warn(`Attempt ${attempt} failed for "${keyword}":`, err.message);
+                    if (err.message.includes('429') && attempt < maxRetries) {
+                        const waitTime = Math.pow(2, attempt) * 1500; // 지수 백오프 (3초, 6초...)
+                        document.getElementById('loadingText').innerText = `API 요청 한도 초과(429). ${waitTime/1000}초 후 재시도 중... (${attempt}/${maxRetries})`;
+                        await new Promise(resolve => setTimeout(resolve, waitTime));
+                    } else if (attempt === maxRetries) {
+                        throw err;
+                    } else {
+                        await new Promise(resolve => setTimeout(resolve, 1500));
+                    }
+                }
+            }
+            return [];
         }
 
         async function fetchNewsForKeyword(keyword, days) {
@@ -329,42 +361,25 @@
             const apiKeyToUse = appState.apiKey || "";
             const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${apiKeyToUse}`;
 
-            let response;
-            try {
-                response = await fetch(apiUrl, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(payload)
-                });
-            } catch (e) {
-                console.error("Network error fetching news", e);
-                return [];
-            }
+            const response = await fetch(apiUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
 
             if (!response.ok) {
                 const errText = await response.text();
-                console.error(`API Error Response:`, errText);
-                throw new Error(`API 오류 (${response.status})`);
+                throw new Error(`API 오류 (${response.status}): ${errText}`);
             }
 
             const result = await response.json();
-            console.log(`[${keyword}] API 응답 결과:`, result);
-
             const candidate = result.candidates?.[0];
 
             if (candidate && candidate.content?.parts?.[0]?.text) {
                 let jsonText = candidate.content.parts[0].text;
-                // 마크다운 코드블록 포함 여부 방어 처리
                 jsonText = jsonText.replace(/```json/g, '').replace(/```/g, '').trim();
-                try {
-                    const parsed = JSON.parse(jsonText);
-                    return Array.isArray(parsed) ? parsed : [];
-                } catch(e) {
-                    console.error("JSON parse error for text:", jsonText, e);
-                    return [];
-                }
-            } else {
-                console.warn(`[${keyword}] 검색 결과 텍스트가 없습니다. Grounding 메타데이터 확인:`, candidate?.groundingMetadata);
+                const parsed = JSON.parse(jsonText);
+                return Array.isArray(parsed) ? parsed : [];
             }
             return [];
         }
@@ -381,7 +396,7 @@
         }
 
         // Render individual keyword column with vertical separator styling
-        function renderColumn(keyword, newsList, columnIndex, totalColumns) {
+        function renderColumn(keyword, newsList, columnIndex, totalColumns, errorMessage = null) {
             const grid = document.getElementById('newsColumnsGrid');
 
             const colDiv = document.createElement('div');
@@ -399,12 +414,19 @@
                 <div class="flex flex-col gap-3 flex-1 overflow-y-auto max-h-[700px]">
             `;
 
-            if (newsList.length === 0) {
+            if (errorMessage) {
+                html += `
+                    <div class="py-8 text-center text-red-500 text-xs flex flex-col gap-2 items-center bg-red-50 p-4 rounded-xl border border-red-100">
+                        <svg class="w-8 h-8 text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path></svg>
+                        <span class="font-semibold">뉴스 수집 실패</span>
+                        <span class="text-[11px] text-red-600 break-all">${escapeHtml(errorMessage)}</span>
+                    </div>
+                `;
+            } else if (newsList.length === 0) {
                 html += `
                     <div class="py-8 text-center text-slate-400 text-xs flex flex-col gap-1 items-center">
                         <svg class="w-8 h-8 text-slate-300" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
                         <span>검색된 기사가 없습니다.</span>
-                        <span class="text-[11px] text-slate-400">F12 개발자도구 콘솔(Console)에서 응답을 확인해보세요.</span>
                     </div>
                 `;
             } else {
