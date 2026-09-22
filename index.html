@@ -257,34 +257,38 @@
             const days = document.getElementById('dateRangeSelect').value;
             const removeDuplicates = document.getElementById('dedupToggle').checked;
 
-            // Fetch news for each keyword in parallel using Gemini Search Grounding
-            const promises = appState.keywords.map(keyword => fetchNewsForKeyword(keyword, days));
+            let allNewsCombined = [];
+            let results = [];
 
-            try {
-                const results = await Promise.all(promises);
-                loading.classList.add('hidden');
-                
-                let allNewsCombined = [];
-                results.forEach((newsList, idx) => {
-                    const keyword = appState.keywords[idx];
+            // 순차적(Sequential)으로 키워드별 뉴스를 수집하여 429(Rate Limit) 에러 방지
+            for (let i = 0; i < appState.keywords.length; i++) {
+                const keyword = appState.keywords[i];
+                try {
+                    const newsList = await fetchNewsForKeyword(keyword, days);
+                    results.push(newsList);
+                    
                     let filteredList = newsList;
-
                     if (removeDuplicates) {
                         filteredList = filterDuplicates(newsList, allNewsCombined);
                     }
-                    
                     allNewsCombined = allNewsCombined.concat(filteredList);
 
-                    renderColumn(keyword, filteredList, idx, results.length);
-                });
+                    renderColumn(keyword, filteredList, i, appState.keywords.length);
 
-                if (results.every(list => list.length === 0)) {
-                    emptyState.classList.remove('hidden');
+                    // API 제한 회피를 위해 다음 키워드 요청 전 1.5초 대기
+                    if (i < appState.keywords.length - 1) {
+                        await new Promise(resolve => setTimeout(resolve, 1500));
+                    }
+                } catch (err) {
+                    console.error(`Error fetching for ${keyword}:`, err);
+                    results.push([]);
+                    renderColumn(keyword, [], i, appState.keywords.length);
                 }
+            }
 
-            } catch (err) {
-                loading.classList.add('hidden');
-                showNotification('뉴스 수집 중 오류가 발생했습니다: ' + err.message);
+            loading.classList.add('hidden');
+
+            if (results.every(list => list.length === 0)) {
                 emptyState.classList.remove('hidden');
             }
         }
